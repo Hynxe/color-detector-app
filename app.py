@@ -5,7 +5,7 @@ import pandas as pd
 import pyttsx3
 import time
 import os
-import tempfile
+from sklearn.cluster import KMeans
 
 # ---------- CONFIG ----------
 CSV_PATH = "colors.csv"
@@ -22,20 +22,22 @@ st.title("🕶️ Smart Glasses Color Detector")
 if not os.path.exists(CSV_PATH):
     st.error("❌ Missing colors.csv. Upload or place it in the same folder.")
     st.stop()
-
 colors = pd.read_csv(CSV_PATH)
+
+# ---------- User options ----------
+tts_enabled = st.toggle("🔊 Enable Voice Output (TTS)", value=False)
+mode = st.radio("Choose mode:", ["📷 Camera Mode", "🖼️ Image Upload Mode"], horizontal=True)
+st.markdown("---")
 
 # ---------- Safe TTS setup ----------
 engine = None
-try:
-    if not os.environ.get("STREAMLIT_SERVER_RUNNING"):
+if tts_enabled:
+    try:
         engine = pyttsx3.init()
         engine.setProperty("rate", 170)
         engine.setProperty("volume", 1.0)
-    else:
-        st.info("🔇 Running on Streamlit Cloud — TTS disabled.")
-except Exception as e:
-    st.warning(f"⚠️ TTS unavailable: {e}")
+    except Exception as e:
+        st.warning(f"⚠️ TTS unavailable: {e}")
 # ------------------------------------
 
 def get_color_name(R, G, B):
@@ -53,10 +55,6 @@ def luminance(r, g, b):
     return 0.2126 * r + 0.7152 * g + 0.0722 * b
 
 
-# ---------- Mode selection ----------
-mode = st.radio("Choose mode:", ["📷 Camera Mode", "🖼️ Image Upload Mode"], horizontal=True)
-st.markdown("---")
-
 # ---------- IMAGE UPLOAD MODE ----------
 if mode == "🖼️ Image Upload Mode":
     uploaded = st.file_uploader("Upload an image", type=["jpg", "jpeg", "png"])
@@ -66,18 +64,13 @@ if mode == "🖼️ Image Upload Mode":
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         st.image(img, caption="Uploaded Image", use_container_width=True)
 
-        # Interactive color picker
-        st.write("🖱️ Click anywhere on the image to detect the color.")
-        click = st.button("Detect Dominant Color")
-        if click:
-            pixels = img.reshape((-1, 3))
-            pixels = np.float32(pixels)
-            from sklearn.cluster import KMeans
+        if st.button("Detect Dominant Color"):
+            pixels = np.float32(img.reshape((-1, 3)))
             kmeans = KMeans(n_clusters=3, n_init=10)
             kmeans.fit(pixels)
             centers = np.uint8(kmeans.cluster_centers_)
             dominant = centers[0]
-            r, g, b = int(dominant[0]), int(dominant[1]), int(dominant[2])
+            r, g, b = map(int, dominant)
             cname = get_color_name(r, g, b)
             st.success(f"🎨 Dominant Color: **{cname}** ({r},{g},{b})")
             if engine:
@@ -87,10 +80,10 @@ if mode == "🖼️ Image Upload Mode":
 # ---------- CAMERA MODE ----------
 elif mode == "📷 Camera Mode":
     st.write("🎥 Center your object in view and hold still for ~2 seconds.")
-
-    # Start camera capture
     run_camera = st.button("▶️ Start Camera")
-    if run_camera:
+    stop_camera = st.button("⏹️ Stop Camera")
+
+    if run_camera and not stop_camera:
         cap = cv2.VideoCapture(0)
         if not cap.isOpened():
             st.error("❌ Could not access camera.")
@@ -122,8 +115,9 @@ elif mode == "📷 Camera Mode":
                 # HUD overlay
                 cv2.circle(frame, (cx, cy), RING_RADIUS, hud_color, 3)
                 cv2.circle(frame, (cx, cy), 5, hud_color, -1)
+                cv2.putText(frame, cname, (cx - 100, cy + RING_RADIUS + 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1, hud_color, 2, cv2.LINE_AA)
 
-                # stability check
                 now = time.time()
                 if cname == last_color:
                     if stable_since is None:
@@ -141,12 +135,12 @@ elif mode == "📷 Camera Mode":
                     last_color = cname
                     stable_since = now
 
-                # show frame
+                # Show frame
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 placeholder.image(frame_rgb, channels="RGB", use_container_width=True)
 
-                # break condition
-                if not run_camera:
+                # Stop loop
+                if stop_camera or not run_camera:
                     break
 
             cap.release()
