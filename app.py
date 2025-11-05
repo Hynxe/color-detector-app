@@ -1,93 +1,135 @@
 import streamlit as st
 import cv2
-import pandas as pd
 import numpy as np
-from sklearn.cluster import KMeans
-from PIL import Image
+import pandas as pd
+import time
 import pyttsx3
 
-# =========================
-# Load color data
-# =========================
-@st.cache_data
-def load_colors():
-    colors = pd.read_csv("colors.csv")
-    return colors
+# ---------- CONFIG ----------
+CSV_PATH = "colors.csv"
+STABLE_HOVER_TIME = 2.0
+LUMINANCE_THRESHOLD = 130
+# ----------------------------
 
-colors = load_colors()
+# Load color dataset
+colors = pd.read_csv(CSV_PATH)
 
-# =========================
-# Utility functions
-# =========================
+# Initialize TTS
+engine = pyttsx3.init()
+engine.setProperty("rate", 170)
+engine.setProperty("volume", 1.0)
+
+# ---------- Helper Functions ----------
 def get_color_name(R, G, B):
-    """Find the closest color name from dataset."""
-    minimum = float('inf')
-    cname = "Unknown"
+    """Return nearest named color from CSV based on Manhattan distance in RGB."""
+    min_dist = float("inf")
+    cname = ""
     for i in range(len(colors)):
         d = abs(R - int(colors.loc[i, "R"])) + abs(G - int(colors.loc[i, "G"])) + abs(B - int(colors.loc[i, "B"]))
-        if d <= minimum:
-            minimum = d
+        if d < min_dist:
+            min_dist = d
             cname = colors.loc[i, "color_name"]
     return cname
 
-def get_dominant_color(image, k=3):
-    """Use KMeans to find the dominant color in an image."""
-    img = np.array(image)
-    img = img.reshape((-1, 3))
-    kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
-    kmeans.fit(img)
-    cluster_centers = np.uint8(kmeans.cluster_centers_)
-    counts = np.bincount(kmeans.labels_)
-    dominant = cluster_centers[np.argmax(counts)]
-    return tuple(int(c) for c in dominant)
+def luminance(r, g, b):
+    """Approximate perceived luminance."""
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
 
-def speak_color(color_name):
-    """Speak the detected color name (local only)."""
-    try:
-        engine = pyttsx3.init()
-        engine.say(color_name)
-        engine.runAndWait()
-    except:
-        st.warning("Speech not supported on this platform.")
+# ---------- Streamlit Setup ----------
+st.set_page_config(page_title="Smart Color Detector", layout="wide")
+st.title("🎨 Smart Color Detector")
 
-# =========================
-# Streamlit UI
-# =========================
-st.set_page_config(page_title="Smart Color Camera", page_icon="🎥", layout="centered")
+mode = st.radio("Choose Mode:", ["📸 Camera Mode", "🖼️ Image Upload Mode"], horizontal=True)
+st.markdown("---")
 
-st.title("🎥 Smart Color Detector (Camera Mode)")
-st.write("Use your **camera** to capture an image and detect the dominant color.")
+# =======================================
+# MODE 1: CAMERA DETECTOR
+# =======================================
+if mode == "📸 Camera Mode":
+    st.subheader("Live Camera Color Detection")
+    st.write("Center a color under the crosshair and hold for 2 seconds to hear its name.")
 
-# Camera input
-camera_image = st.camera_input("Capture Image")
+    run = st.checkbox("Start Camera")
+    FRAME_WINDOW = st.image([])
 
-if camera_image:
-    # Convert to RGB image
-    image = Image.open(camera_image).convert('RGB')
-    st.image(image, caption="Captured Frame", use_container_width=True)
+    if run:
+        cap = cv2.VideoCapture(0)
+        last_color = None
+        stable_since = time.time()
+        spoken = None
 
-    # Detect dominant color
-    dominant = get_dominant_color(image)
-    color_name = get_color_name(*dominant)
+        while run:
+            ret, frame = cap.read()
+            if not ret:
+                st.warning("⚠️ Unable to access camera.")
+                break
 
-    # Display result
-    st.subheader("🎨 Detected Dominant Color")
-    col1, col2 = st.columns([1, 2])
-    with col1:
-        st.markdown(f"**Name:** {color_name}")
-        st.markdown(f"**RGB:** {dominant}")
-    with col2:
+            frame = cv2.flip(frame, 1)
+            h, w, _ = frame.shape
+            cx, cy = w // 2, h // 2
+
+            # Sample a small region around center
+            region = frame[cy - 10:cy + 10, cx - 10:cx + 10]
+            avg_bgr = region.mean(axis=(0, 1))
+            b, g, r = [int(x) for x in avg_bgr]
+            current_name = get_color_name(r, g, b)
+
+            # Choose HUD color (white or black depending on background)
+            hud_color = (255, 255, 255) if luminance(r, g, b) < LUMINANCE_THRESHOLD else (0, 0, 0)
+
+            # Draw HUD crosshair
+            cv2.circle(frame, (cx, cy), 60, hud_color, 3)
+            cv2.line(frame, (cx - 25, cy), (cx + 25, cy), hud_color, 2)
+            cv2.line(frame, (cx, cy - 25), (cx, cy + 25), hud_color, 2)
+
+            # Draw color preview box
+            preview_h, preview_w = 80, 300
+            cv2.rectangle(frame, (20, 20), (20 + preview_w, 20 + preview_h), (b, g, r), -1)
+            txt_color = (255, 255, 255) if luminance(r, g, b) < LUMINANCE_THRESHOLD else (0, 0, 0)
+            cv2.putText(frame, current_name, (40, 70), cv2.FONT_HERSHEY_SIMPLEX, 1.2, txt_color, 3)
+
+            # Stability check for voice feedback
+            now = time.time()
+            if current_name == last_color:
+                if now - stable_since > STABLE_HOVER_TIME and spoken != current_name:
+                    engine.say(current_name)
+                    engine.runAndWait()
+                    spoken = current_name
+            else:
+                last_color = current_name
+                stable_since = now
+
+            FRAME_WINDOW.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+
+        cap.release()
+        st.write("Camera stopped.")
+
+# =======================================
+# MODE 2: IMAGE UPLOAD
+# =======================================
+elif mode == "🖼️ Image Upload Mode":
+    st.subheader("Upload an Image to Detect Colors")
+    uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "png", "jpeg"])
+
+    if uploaded_file is not None:
+        file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
+        image = cv2.imdecode(file_bytes, 1)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        st.image(image, channels="RGB", caption="Uploaded Image")
+
+        st.write("Click anywhere on the image to detect color (experimental).")
+
+        # Streamlit can’t capture pixel clicks directly yet,
+        # so we’ll add a simple hover color picker area for now.
+        x = st.slider("X (horizontal position)", 0, image.shape[1]-1, image.shape[1]//2)
+        y = st.slider("Y (vertical position)", 0, image.shape[0]-1, image.shape[0]//2)
+
+        pixel = image[y, x]
+        r, g, b = int(pixel[0]), int(pixel[1]), int(pixel[2])
+        cname = get_color_name(r, g, b)
+        st.write(f"**Detected Color:** {cname}")
         st.markdown(
-            f"""
-            <div style='background-color: rgb{dominant}; 
-                        width: 100%; height: 100px; 
-                        border-radius: 10px;'>
-            </div>
-            """,
+            f"<div style='width:100px;height:50px;background-color:rgb({r},{g},{b});border-radius:8px;'></div>",
             unsafe_allow_html=True
         )
-
-    if st.button("🔊 Speak Color"):
-        speak_color(color_name)
-else:
-    st.info("📸 Click the camera above to capture an image.")
