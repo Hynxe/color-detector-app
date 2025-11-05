@@ -1,6 +1,7 @@
+streamlit
 opencv-python-headless
 pandas
 numpy
+scikit-learn
 pyttsx3
-streamlit
 Pillow

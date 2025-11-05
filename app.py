@@ -2,9 +2,9 @@ import streamlit as st
 import cv2
 import pandas as pd
 import numpy as np
+from sklearn.cluster import KMeans
 from PIL import Image
 import pyttsx3
-from sklearn.cluster import KMeans
 
 # =========================
 # Load color data
@@ -31,7 +31,7 @@ def get_color_name(R, G, B):
     return cname
 
 def get_dominant_color(image, k=3):
-    """Use KMeans to find the dominant color in the image."""
+    """Use KMeans to find the dominant color in an image."""
     img = np.array(image)
     img = img.reshape((-1, 3))
     kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
@@ -42,34 +42,36 @@ def get_dominant_color(image, k=3):
     return tuple(int(c) for c in dominant)
 
 def speak_color(color_name):
-    """Speak the detected color name (works locally only)."""
+    """Speak the detected color name (local only)."""
     try:
         engine = pyttsx3.init()
         engine.say(color_name)
         engine.runAndWait()
     except:
-        st.warning("Speech not available on this platform.")
+        st.warning("Speech not supported on this platform.")
 
 # =========================
 # Streamlit UI
 # =========================
-st.set_page_config(page_title="Color Detector", page_icon="🎨", layout="centered")
-st.title("🎨 Smart Color Detector App")
-st.write("Upload an image to detect its **dominant color** and hear it spoken aloud!")
+st.set_page_config(page_title="Smart Color Camera", page_icon="🎥", layout="centered")
 
-uploaded_file = st.file_uploader("📸 Upload Image", type=["jpg", "jpeg", "png"])
+st.title("🎥 Smart Color Detector (Camera Mode)")
+st.write("Use your **camera** to capture an image and detect the dominant color.")
 
-if uploaded_file is not None:
-    # Read the image
-    image = Image.open(uploaded_file).convert('RGB')
-    st.image(image, caption="Uploaded Image", use_container_width=True)
+# Camera input
+camera_image = st.camera_input("Capture Image")
+
+if camera_image:
+    # Convert to RGB image
+    image = Image.open(camera_image).convert('RGB')
+    st.image(image, caption="Captured Frame", use_container_width=True)
 
     # Detect dominant color
     dominant = get_dominant_color(image)
     color_name = get_color_name(*dominant)
 
-    # Display results
-    st.subheader("Detected Dominant Color:")
+    # Display result
+    st.subheader("🎨 Detected Dominant Color")
     col1, col2 = st.columns([1, 2])
     with col1:
         st.markdown(f"**Name:** {color_name}")
@@ -85,8 +87,7 @@ if uploaded_file is not None:
             unsafe_allow_html=True
         )
 
-    # Speak button
     if st.button("🔊 Speak Color"):
         speak_color(color_name)
 else:
-    st.info("Please upload an image to start detecting colors.")
+    st.info("📸 Click the camera above to capture an image.")
