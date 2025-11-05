@@ -2,26 +2,44 @@ import streamlit as st
 import cv2
 import numpy as np
 import pandas as pd
-import time
 import pyttsx3
+import time
+import os
+import tempfile
 
 # ---------- CONFIG ----------
 CSV_PATH = "colors.csv"
-STABLE_HOVER_TIME = 2.0
+STABLE_COLOR_TIME = 2.0
+RING_RADIUS = 80
 LUMINANCE_THRESHOLD = 130
+SCREEN_WIDTH, SCREEN_HEIGHT = 1280, 720
 # ----------------------------
 
-# Load color dataset
+st.set_page_config(page_title="Smart Glasses Color Detector", layout="wide")
+st.title("🕶️ Smart Glasses Color Detector")
+
+# ---------- Load color data ----------
+if not os.path.exists(CSV_PATH):
+    st.error("❌ Missing colors.csv. Upload or place it in the same folder.")
+    st.stop()
+
 colors = pd.read_csv(CSV_PATH)
 
-# Initialize TTS
-engine = pyttsx3.init()
-engine.setProperty("rate", 170)
-engine.setProperty("volume", 1.0)
+# ---------- Safe TTS setup ----------
+engine = None
+try:
+    if not os.environ.get("STREAMLIT_SERVER_RUNNING"):
+        engine = pyttsx3.init()
+        engine.setProperty("rate", 170)
+        engine.setProperty("volume", 1.0)
+    else:
+        st.info("🔇 Running on Streamlit Cloud — TTS disabled.")
+except Exception as e:
+    st.warning(f"⚠️ TTS unavailable: {e}")
+# ------------------------------------
 
-# ---------- Helper Functions ----------
 def get_color_name(R, G, B):
-    """Return nearest named color from CSV based on Manhattan distance in RGB."""
+    """Return nearest named color from CSV."""
     min_dist = float("inf")
     cname = ""
     for i in range(len(colors)):
@@ -32,104 +50,105 @@ def get_color_name(R, G, B):
     return cname
 
 def luminance(r, g, b):
-    """Approximate perceived luminance."""
     return 0.2126 * r + 0.7152 * g + 0.0722 * b
 
-# ---------- Streamlit Setup ----------
-st.set_page_config(page_title="Smart Color Detector", layout="wide")
-st.title("🎨 Smart Color Detector")
 
-mode = st.radio("Choose Mode:", ["📸 Camera Mode", "🖼️ Image Upload Mode"], horizontal=True)
+# ---------- Mode selection ----------
+mode = st.radio("Choose mode:", ["📷 Camera Mode", "🖼️ Image Upload Mode"], horizontal=True)
 st.markdown("---")
 
-# =======================================
-# MODE 1: CAMERA DETECTOR
-# =======================================
-if mode == "📸 Camera Mode":
-    st.subheader("Live Camera Color Detection")
-    st.write("Center a color under the crosshair and hold for 2 seconds to hear its name.")
+# ---------- IMAGE UPLOAD MODE ----------
+if mode == "🖼️ Image Upload Mode":
+    uploaded = st.file_uploader("Upload an image", type=["jpg", "jpeg", "png"])
+    if uploaded:
+        file_bytes = np.asarray(bytearray(uploaded.read()), dtype=np.uint8)
+        img = cv2.imdecode(file_bytes, 1)
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        st.image(img, caption="Uploaded Image", use_container_width=True)
 
-    run = st.checkbox("Start Camera")
-    FRAME_WINDOW = st.image([])
+        # Interactive color picker
+        st.write("🖱️ Click anywhere on the image to detect the color.")
+        click = st.button("Detect Dominant Color")
+        if click:
+            pixels = img.reshape((-1, 3))
+            pixels = np.float32(pixels)
+            from sklearn.cluster import KMeans
+            kmeans = KMeans(n_clusters=3, n_init=10)
+            kmeans.fit(pixels)
+            centers = np.uint8(kmeans.cluster_centers_)
+            dominant = centers[0]
+            r, g, b = int(dominant[0]), int(dominant[1]), int(dominant[2])
+            cname = get_color_name(r, g, b)
+            st.success(f"🎨 Dominant Color: **{cname}** ({r},{g},{b})")
+            if engine:
+                engine.say(cname)
+                engine.runAndWait()
 
-    if run:
+# ---------- CAMERA MODE ----------
+elif mode == "📷 Camera Mode":
+    st.write("🎥 Center your object in view and hold still for ~2 seconds.")
+
+    # Start camera capture
+    run_camera = st.button("▶️ Start Camera")
+    if run_camera:
         cap = cv2.VideoCapture(0)
-        last_color = None
-        stable_since = time.time()
-        spoken = None
+        if not cap.isOpened():
+            st.error("❌ Could not access camera.")
+        else:
+            placeholder = st.empty()
+            last_color = None
+            stable_since = None
+            spoken_for = None
 
-        while run:
-            ret, frame = cap.read()
-            if not ret:
-                st.warning("⚠️ Unable to access camera.")
-                break
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    st.error("⚠️ Camera disconnected.")
+                    break
 
-            frame = cv2.flip(frame, 1)
-            h, w, _ = frame.shape
-            cx, cy = w // 2, h // 2
+                frame = cv2.flip(frame, 1)
+                frame = cv2.resize(frame, (SCREEN_WIDTH, SCREEN_HEIGHT))
+                cx, cy = SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2
 
-            # Sample a small region around center
-            region = frame[cy - 10:cy + 10, cx - 10:cx + 10]
-            avg_bgr = region.mean(axis=(0, 1))
-            b, g, r = [int(x) for x in avg_bgr]
-            current_name = get_color_name(r, g, b)
+                region = frame[cy-5:cy+5, cx-5:cx+5]
+                avg_bgr = region.mean(axis=(0, 1))
+                b, g, r = [int(x) for x in avg_bgr]
+                cname = get_color_name(r, g, b)
 
-            # Choose HUD color (white or black depending on background)
-            hud_color = (255, 255, 255) if luminance(r, g, b) < LUMINANCE_THRESHOLD else (0, 0, 0)
+                # Luminance for HUD contrast
+                lum = luminance(r, g, b)
+                hud_color = (255, 255, 255) if lum < LUMINANCE_THRESHOLD else (0, 0, 0)
 
-            # Draw HUD crosshair
-            cv2.circle(frame, (cx, cy), 60, hud_color, 3)
-            cv2.line(frame, (cx - 25, cy), (cx + 25, cy), hud_color, 2)
-            cv2.line(frame, (cx, cy - 25), (cx, cy + 25), hud_color, 2)
+                # HUD overlay
+                cv2.circle(frame, (cx, cy), RING_RADIUS, hud_color, 3)
+                cv2.circle(frame, (cx, cy), 5, hud_color, -1)
 
-            # Draw color preview box
-            preview_h, preview_w = 80, 300
-            cv2.rectangle(frame, (20, 20), (20 + preview_w, 20 + preview_h), (b, g, r), -1)
-            txt_color = (255, 255, 255) if luminance(r, g, b) < LUMINANCE_THRESHOLD else (0, 0, 0)
-            cv2.putText(frame, current_name, (40, 70), cv2.FONT_HERSHEY_SIMPLEX, 1.2, txt_color, 3)
+                # stability check
+                now = time.time()
+                if cname == last_color:
+                    if stable_since is None:
+                        stable_since = now
+                    elapsed = now - stable_since
+                    if elapsed >= STABLE_COLOR_TIME:
+                        if spoken_for != cname:
+                            if engine:
+                                engine.say(cname)
+                                engine.runAndWait()
+                            else:
+                                st.write(f"🎨 Detected color: **{cname}**")
+                            spoken_for = cname
+                else:
+                    last_color = cname
+                    stable_since = now
 
-            # Stability check for voice feedback
-            now = time.time()
-            if current_name == last_color:
-                if now - stable_since > STABLE_HOVER_TIME and spoken != current_name:
-                    engine.say(current_name)
-                    engine.runAndWait()
-                    spoken = current_name
-            else:
-                last_color = current_name
-                stable_since = now
+                # show frame
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                placeholder.image(frame_rgb, channels="RGB", use_container_width=True)
 
-            FRAME_WINDOW.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                # break condition
+                if not run_camera:
+                    break
 
-        cap.release()
-        st.write("Camera stopped.")
-
-# =======================================
-# MODE 2: IMAGE UPLOAD
-# =======================================
-elif mode == "🖼️ Image Upload Mode":
-    st.subheader("Upload an Image to Detect Colors")
-    uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "png", "jpeg"])
-
-    if uploaded_file is not None:
-        file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
-        image = cv2.imdecode(file_bytes, 1)
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
-        st.image(image, channels="RGB", caption="Uploaded Image")
-
-        st.write("Click anywhere on the image to detect color (experimental).")
-
-        # Streamlit can’t capture pixel clicks directly yet,
-        # so we’ll add a simple hover color picker area for now.
-        x = st.slider("X (horizontal position)", 0, image.shape[1]-1, image.shape[1]//2)
-        y = st.slider("Y (vertical position)", 0, image.shape[0]-1, image.shape[0]//2)
-
-        pixel = image[y, x]
-        r, g, b = int(pixel[0]), int(pixel[1]), int(pixel[2])
-        cname = get_color_name(r, g, b)
-        st.write(f"**Detected Color:** {cname}")
-        st.markdown(
-            f"<div style='width:100px;height:50px;background-color:rgb({r},{g},{b});border-radius:8px;'></div>",
-            unsafe_allow_html=True
-        )
+            cap.release()
+            placeholder.empty()
+            st.success("👋 Camera closed.")
