@@ -1,0 +1,7 @@
+opencv-python-headless==4.10.0.84
+numpy
+pandas
+Pillow
+pyttsx3
+streamlit
+scikit-learn
