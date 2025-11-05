@@ -1,7 +1,6 @@
-opencv-python-headless==4.10.0.84
-numpy
+opencv-python-headless
 pandas
-Pillow
+numpy
 pyttsx3
 streamlit
-scikit-learn
+Pillow
